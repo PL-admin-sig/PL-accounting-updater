@@ -193,8 +193,8 @@
         { col: 1, vals: ["Account No",        ...newPd.map(r => r["Account No"])] },
         { col: 2, vals: ["Primary Homeowner",  ...newPd.map(r => r["Primary Homeowner"])] },
         { col: 3, vals: ["Address",            ...newPd.map(r => r["Address"])] },
-        { col: 4, vals: ["Email",              ...newPd.map(r => r["Email"])] },
-        { col: 5, vals: ["Balance"] },
+        { col: 4, vals: ["Email"] },
+        { col: 5, vals: ["Balance",           ...newPd.map(r => r["Balance"])] },
         { col: 6, vals: ["Last Contacted"] },
         { col: 7, vals: ["Notes",              ...newPd.map(r => r["Notes"])] },
       ];
@@ -217,8 +217,8 @@
         { col: 1, vals: ["Account No",        ...updatedMaster.map(r => r["Account No"])] },
         { col: 2, vals: ["Primary Homeowner",  ...updatedMaster.map(r => r["Primary Homeowner"])] },
         { col: 3, vals: ["Address",            ...updatedMaster.map(r => r["Address"])] },
-        { col: 4, vals: ["Email",              ...updatedMaster.map(r => r["Email"])] },
-        { col: 5, vals: ["Balance"] },
+        { col: 4, vals: ["Email"] },
+        { col: 5, vals: ["Balance",           ...updatedMaster.map(r => r["Balance"])] },
       ];
       for (const { col, vals } of maCols) maWs.getColumn(col).width = autofitWidth(vals);
 
