@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Prosperity Lakes – Accounting Sync</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0f1a; color: #e2e8f0; font-family: 'DM Sans', sans-serif; min-height: 100vh; }
+    button { font-family: 'DM Sans', sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    const { useState, useCallback } = React;
+
+    const MASTER_COLS = ["Account No", "Primary Homeowner", "Address", "Email", "Balance"];
+    const PD_COLS = ["Account No", "Primary Homeowner", "Address", "Email", "Balance", "Last Contacted", "Notes"];
+    const KEY_COL = "Account No";
+    const PD_THRESHOLD = 10;
+
+    function parseMaster(wb) {
+      const ws = wb.Sheets["Master Accounting"];
+      if (!ws) throw new Error('Sheet "Master Accounting" not found.');
+      return XLSX.utils.sheet_to_json(ws, { defval: "" });
+    }
+
+    function parsePastDue(wb) {
+      const ws = wb.Sheets["Past Due"];
+      if (!ws) return [];
+      return XLSX.utils.sheet_to_json(ws, { defval: "" });
+    }
+
+    function parseCINC(wb) {
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      return XLSX.utils.sheet_to_json(ws, { defval: "" });
+    }
+
+    function syncMaster(masterRows, cincRows) {
+      const masterMap = new Map(masterRows.map((r, i) => [r[KEY_COL], { row: r, idx: i }]));
+      const updated = masterRows.map((r) => ({ ...r }));
+      const changes = [];
+      const added = [];
+      for (const cr of cincRows) {
+        const key = cr[KEY_COL];
+        if (!key) continue;
+        if (masterMap.has(key)) {
+          const { row, idx } = masterMap.get(key);
+          const oldBal = row["Balance"];
+          const newBal = cr["Balance"];
+          if (String(oldBal) !== String(newBal)) {
+            updated[idx]["Balance"] = newBal;
+            changes.push({ accountNo: key, name: row["Primary Homeowner"], address: row["Address"], oldBalance: oldBal, newBalance: newBal });
+          }
+        } else {
+          const newRow = {};
+          for (const col of MASTER_COLS) newRow[col] = cr[col] !== undefined ? cr[col] : "";
+          updated.push(newRow);
+          added.push(newRow);
+        }
+      }
+      return { updated, changes, added };
+    }
+
+    function syncPastDue(updatedMasterRows, oldPdRows) {
+      const pdMeta = new Map();
+      for (const row of oldPdRows) {
+        const key = row[KEY_COL] || row["Primary Homeowner"];
+        if (key) pdMeta.set(key, { "Last Contacted": row["Last Contacted"] ?? "", "Notes": row["Notes"] ?? "" });
+      }
+      const newPd = [], pdAdded = [], pdRemoved = [], pdCleaned = [];
+      const qualifiedKeys = new Set();
+      for (const mr of updatedMasterRows) {
+        const bal = parseFloat(mr["Balance"]);
+        if (!isNaN(bal) && bal > PD_THRESHOLD) {
+          const key = mr[KEY_COL];
+          qualifiedKeys.add(key);
+          const meta = pdMeta.get(key) || pdMeta.get(mr["Primary Homeowner"]) || { "Last Contacted": "", "Notes": "" };
+          const pdRow = {
+            "Account No": mr["Account No"],
+            "Primary Homeowner": mr["Primary Homeowner"],
+            "Address": mr["Address"],
+            "Email": mr["Email"],
+            "Balance": mr["Balance"],
+            "Last Contacted": meta["Last Contacted"],
+            "Notes": meta["Notes"],
+          };
+          newPd.push(pdRow);
+          const wasInPd = pdMeta.has(key) || pdMeta.has(mr["Primary Homeowner"]);
+          if (!wasInPd) pdAdded.push(pdRow);
+        }
+      }
+      for (const row of oldPdRows) {
+        const key = row[KEY_COL] || row["Primary Homeowner"];
+        if (!key) continue;
+        const masterMatch = updatedMasterRows.find((mr) => mr[KEY_COL] === row[KEY_COL] || mr["Primary Homeowner"] === row["Primary Homeowner"]);
+        const currentBal = masterMatch ? parseFloat(masterMatch["Balance"]) : parseFloat(row["Balance"]);
+        if (!qualifiedKeys.has(row[KEY_COL])) {
+          if (!isNaN(currentBal) && currentBal > PD_THRESHOLD) {
+            pdRemoved.push({ ...row, Balance: currentBal });
+          } else {
+            pdCleaned.push({ ...row, Balance: currentBal });
+          }
+        }
+      }
+      return { newPd, pdAdded, pdRemoved, pdCleaned };
+    }
+
+    function buildWorkbook(originalWb, updatedMaster, newPd) {
+      const newWb = XLSX.utils.book_new();
+      for (const name of originalWb.SheetNames) {
+        if (name === "Master Accounting") {
+          const ws = XLSX.utils.json_to_sheet(updatedMaster, { header: MASTER_COLS });
+          XLSX.utils.book_append_sheet(newWb, ws, name);
+        } else if (name === "Past Due") {
+          const ws = XLSX.utils.json_to_sheet(newPd, { header: PD_COLS });
+          XLSX.utils.book_append_sheet(newWb, ws, name);
+        } else {
+          XLSX.utils.book_append_sheet(newWb, originalWb.Sheets[name], name);
+        }
+      }
+      return newWb;
+    }
+
+    function fmt(val) {
+      const n = parseFloat(val);
+      if (isNaN(n)) return String(val != null ? val : "");
+      return "$" + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    }
+
+    const TABS = [
+      { id: "balances", label: "Balance Changes" },
+      { id: "newmaster", label: "New Accounts" },
+      { id: "pdadded", label: "Added to Past Due" },
+      { id: "pdremoved", label: "Removed from Past Due" },
+    ];
+
+    function TableSection({ rows, columns, emptyMsg }) {
+      if (rows.length === 0) {
+        return React.createElement("div", { style: { color: "#475569", fontSize: "0.83rem", padding: "20px", textAlign: "center", fontStyle: "italic" } }, emptyMsg);
+      }
+      return React.createElement("div", { style: { overflowX: "auto" } },
+        React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "0.78rem" } },
+          React.createElement("thead", null,
+            React.createElement("tr", { style: { background: "#1e293b" } },
+              columns.map((c) => React.createElement("th", {
+                key: c.key,
+                style: { padding: "9px 12px", textAlign: "left", color: "#64748b", fontFamily: "'DM Mono', monospace", fontSize: "0.68rem", textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap" }
+              }, c.label))
+            )
+          ),
+          React.createElement("tbody", null,
+            rows.map((row, i) =>
+              React.createElement("tr", { key: i, style: { borderTop: "1px solid #1e293b" } },
+                columns.map((c) => React.createElement("td", {
+                  key: c.key,
+                  style: { padding: "8px 12px", color: c.color ? c.color(row) : "#e2e8f0", fontFamily: c.mono ? "'DM Mono', monospace" : "inherit", whiteSpace: c.nowrap ? "nowrap" : "normal" }
+                }, c.render ? c.render(row) : (row[c.key] != null ? row[c.key] : "")))
+              )
+            )
+          )
+        )
+      );
+    }
+
+    function DropZone({ type, label, hint, wb, fileName, onDrop, onDragOver, onDragLeave, onChange, dragging }) {
+      return React.createElement("div", {
+        onDrop: (e) => onDrop(e, type),
+        onDragOver: (e) => { e.preventDefault(); onDragOver(type); },
+        onDragLeave: onDragLeave,
+        style: {
+          flex: 1, borderRadius: 12, padding: "26px 18px", textAlign: "center",
+          border: `2px dashed ${dragging === type ? "#3b82f6" : wb ? "#22c55e" : "#334155"}`,
+          background: dragging === type ? "#1e3a5f" : wb ? "#0a2018" : "#0f172a",
+          transition: "all 0.2s", cursor: "pointer",
+        }
+      },
+        React.createElement("label", { style: { cursor: "pointer", display: "block" } },
+          React.createElement("input", { type: "file", accept: ".xlsx,.xls", style: { display: "none" }, onChange: (e) => onChange(e, type) }),
+          React.createElement("div", { style: { fontSize: "2rem", marginBottom: 6 } }, wb ? "✅" : "📂"),
+          React.createElement("div", { style: { fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: "0.8rem", color: "#94a3b8", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 } }, label),
+          React.createElement("div", { style: { fontFamily: "'DM Mono', monospace", fontSize: "0.72rem", color: wb ? "#86efac" : "#475569" } }, wb ? fileName : hint)
+        )
+      );
+    }
+
+    function App() {
+      const [masterWb, setMasterWb] = useState(null);
+      const [masterName, setMasterName] = useState("");
+      const [cincWb, setCincWb] = useState(null);
+      const [cincName, setCincName] = useState("");
+      const [result, setResult] = useState(null);
+      const [error, setError] = useState("");
+      const [dragging, setDragging] = useState(null);
+      const [activeTab, setActiveTab] = useState("balances");
+
+      const readFile = (file, setter, nameSetter) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const wb = XLSX.read(e.target.result, { type: "array" });
+            setter(wb);
+            nameSetter(file.name);
+            setError("");
+            setResult(null);
+          } catch (err) {
+            setError("Could not read: " + file.name);
+          }
+        };
+        reader.readAsArrayBuffer(file);
+      };
+
+      const handleDrop = useCallback((e, type) => {
+        e.preventDefault();
+        setDragging(null);
+        const file = e.dataTransfer.files[0];
+        if (!file) return;
+        if (type === "master") readFile(file, setMasterWb, setMasterName);
+        else readFile(file, setCincWb, setCincName);
+      }, []);
+
+      const handleFileInput = (e, type) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (type === "master") readFile(file, setMasterWb, setMasterName);
+        else readFile(file, setCincWb, setCincName);
+      };
+
+      const runSync = () => {
+        setError("");
+        try {
+          const masterRows = parseMaster(masterWb);
+          const oldPdRows = parsePastDue(masterWb);
+          const cincRows = parseCINC(cincWb);
+          const { updated, changes, added } = syncMaster(masterRows, cincRows);
+          const { newPd, pdAdded, pdRemoved, pdCleaned } = syncPastDue(updated, oldPdRows);
+          const newWb = buildWorkbook(masterWb, updated, newPd);
+          setResult({ changes, added, newPd, pdAdded, pdRemoved, pdCleaned, newWb, totalMaster: updated.length });
+          setActiveTab("balances");
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      const download = () => {
+        const buf = XLSX.write(result.newWb, { bookType: "xlsx", type: "array" });
+        const blob = new Blob([buf], { type: "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "Prosperity_Lakes_Accounting_Updated.xlsx";
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const tabContent = result ? {
+        balances: React.createElement(TableSection, {
+          rows: result.changes, emptyMsg: "No balance changes detected.",
+          columns: [
+            { key: "accountNo", label: "Account No", mono: true, color: () => "#94a3b8", nowrap: true },
+            { key: "name", label: "Homeowner" },
+            { key: "oldBalance", label: "Old Balance", mono: true, nowrap: true, color: () => "#f87171", render: (r) => fmt(r.oldBalance) },
+            { key: "newBalance", label: "New Balance", mono: true, nowrap: true, color: () => "#86efac", render: (r) => fmt(r.newBalance) },
+          ]
+        }),
+        newmaster: React.createElement(TableSection, {
+          rows: result.added, emptyMsg: "No new accounts added to Master.",
+          columns: [
+            { key: "Account No", label: "Account No", mono: true, color: () => "#94a3b8", nowrap: true },
+            { key: "Primary Homeowner", label: "Homeowner" },
+            { key: "Address", label: "Address", color: () => "#94a3b8" },
+            { key: "Balance", label: "Balance", mono: true, nowrap: true, color: () => "#86efac", render: (r) => fmt(r["Balance"]) },
+          ]
+        }),
+        pdadded: React.createElement(TableSection, {
+          rows: result.pdAdded, emptyMsg: "No new rows added to Past Due.",
+          columns: [
+            { key: "Account No", label: "Account No", mono: true, color: () => "#94a3b8", nowrap: true },
+            { key: "Primary Homeowner", label: "Homeowner" },
+            { key: "Address", label: "Address", color: () => "#94a3b8" },
+            { key: "Balance", label: "Balance", mono: true, nowrap: true, color: () => "#86efac", render: (r) => fmt(r["Balance"]) },
+          ]
+        }),
+        pdremoved: React.createElement(TableSection, {
+          rows: [...result.pdRemoved, ...result.pdCleaned], emptyMsg: "No rows removed from Past Due.",
+          columns: [
+            { key: "Account No", label: "Account No", mono: true, color: () => "#94a3b8", nowrap: true },
+            { key: "Primary Homeowner", label: "Homeowner" },
+            { key: "Address", label: "Address", color: () => "#94a3b8" },
+            { key: "Balance", label: "Balance", mono: true, nowrap: true, color: () => "#f87171", render: (r) => fmt(r["Balance"]) },
+          ]
+        }),
+      } : {};
+
+      const summaryCards = result ? [
+        { label: "Balances Updated", value: result.changes.length, color: "#3b82f6", icon: "🔄" },
+        { label: "New to Master", value: result.added.length, color: "#a78bfa", icon: "➕" },
+        { label: "Added to Past Due", value: result.pdAdded.length, color: "#f59e0b", icon: "📋" },
+        { label: "Removed from Past Due", value: result.pdRemoved.length + result.pdCleaned.length, color: "#22c55e", icon: "✅" },
+      ] : [];
+
+      const tabCounts = result ? { balances: result.changes.length, newmaster: result.added.length, pdadded: result.pdAdded.length, pdremoved: result.pdRemoved.length + result.pdCleaned.length } : {};
+
+      return React.createElement("div", { style: { minHeight: "100vh", background: "#0a0f1a", color: "#e2e8f0", fontFamily: "'DM Sans', sans-serif", padding: "40px 20px" } },
+        React.createElement("div", { style: { maxWidth: 740, margin: "0 auto" } },
+
+          // Header
+          React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14, marginBottom: 8 } },
+            React.createElement("div", { style: { background: "linear-gradient(135deg,#3b82f6,#06b6d4)", borderRadius: 10, width: 42, height: 42, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.3rem", flexShrink: 0 } }, "🏘"),
+            React.createElement("div", null,
+              React.createElement("div", { style: { fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: "1.5rem", letterSpacing: "-0.02em", lineHeight: 1 } }, "Prosperity Lakes"),
+              React.createElement("div", { style: { fontFamily: "'DM Mono', monospace", fontSize: "0.68rem", color: "#64748b", letterSpacing: "0.08em", textTransform: "uppercase" } }, "CINC → Master + Past Due Sync")
+            )
+          ),
+          React.createElement("p", { style: { color: "#64748b", fontSize: "0.83rem", marginBottom: 28, lineHeight: 1.6, marginTop: 12 } },
+            "Syncs CINC balances into Master Accounting, then rebuilds Past Due with all rows over $10. Rows are matched by Account No throughout — including the Past Due sheet, which will now include Account No as its first column."
+          ),
+
+          // Drop zones
+          React.createElement("div", { style: { display: "flex", gap: 14, marginBottom: 16 } },
+            React.createElement(DropZone, { type: "master", label: "Master Accounting", hint: "Prosperity_Lakes_Accounting.xlsx", wb: masterWb, fileName: masterName, onDrop: handleDrop, onDragOver: setDragging, onDragLeave: () => setDragging(null), onChange: handleFileInput, dragging }),
+            React.createElement(DropZone, { type: "cinc", label: "CINC Export", hint: "HomeOwners export from CINC", wb: cincWb, fileName: cincName, onDrop: handleDrop, onDragOver: setDragging, onDragLeave: () => setDragging(null), onChange: handleFileInput, dragging })
+          ),
+
+          // Error
+          error ? React.createElement("div", { style: { background: "#3b0a0a", border: "1px solid #ef4444", borderRadius: 8, padding: "11px 14px", color: "#fca5a5", fontSize: "0.83rem", marginBottom: 14 } }, "⚠️ " + error) : null,
+
+          // Sync button
+          React.createElement("button", {
+            onClick: runSync,
+            disabled: !masterWb || !cincWb,
+            style: {
+              width: "100%", padding: 14,
+              background: masterWb && cincWb ? "linear-gradient(135deg,#3b82f6,#06b6d4)" : "#1e293b",
+              color: masterWb && cincWb ? "#fff" : "#475569",
+              border: "none", borderRadius: 10,
+              fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: "1rem",
+              cursor: masterWb && cincWb ? "pointer" : "not-allowed", letterSpacing: "0.03em",
+            }
+          }, masterWb && cincWb ? "⚡ Sync Balances & Past Due" : "Upload both files to continue"),
+
+          // Results
+          result ? React.createElement("div", { style: { marginTop: 28 } },
+
+            // Summary cards
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 18 } },
+              summaryCards.map((s) =>
+                React.createElement("div", { key: s.label, style: { background: "#111827", border: `1px solid ${s.color}33`, borderRadius: 10, padding: "12px 10px", textAlign: "center" } },
+                  React.createElement("div", { style: { fontSize: "1.2rem" } }, s.icon),
+                  React.createElement("div", { style: { fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: "1.5rem", color: s.color } }, s.value),
+                  React.createElement("div", { style: { fontSize: "0.62rem", color: "#64748b", textTransform: "uppercase", letterSpacing: "0.07em", lineHeight: 1.3 } }, s.label)
+                )
+              )
+            ),
+
+            // Past Due count bar
+            React.createElement("div", { style: { background: "#111827", border: "1px solid #1e293b", borderRadius: 10, padding: "10px 16px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.82rem" } },
+              React.createElement("span", { style: { color: "#64748b" } }, "Past Due sheet will contain"),
+              React.createElement("span", { style: { fontFamily: "'Syne', sans-serif", fontWeight: 700, color: "#f59e0b" } }, result.newPd.length + " rows > $10")
+            ),
+
+            // Download button
+            React.createElement("button", {
+              onClick: download,
+              style: { width: "100%", padding: 13, background: "#0a2018", border: "1px solid #22c55e", borderRadius: 10, color: "#86efac", fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: "0.95rem", cursor: "pointer", marginBottom: 22, letterSpacing: "0.03em" }
+            }, "⬇️ Download Updated File"),
+
+            // Tabs
+            React.createElement("div", { style: { display: "flex", gap: 4, borderBottom: "1px solid #1e293b" } },
+              TABS.map((t) =>
+                React.createElement("button", {
+                  key: t.id,
+                  onClick: () => setActiveTab(t.id),
+                  style: {
+                    padding: "8px 14px", background: "none", border: "none",
+                    borderBottom: activeTab === t.id ? "2px solid #3b82f6" : "2px solid transparent",
+                    color: activeTab === t.id ? "#e2e8f0" : "#64748b",
+                    fontFamily: "'DM Sans', sans-serif", fontWeight: activeTab === t.id ? 700 : 400,
+                    fontSize: "0.78rem", cursor: "pointer", marginBottom: -1, whiteSpace: "nowrap",
+                  }
+                },
+                  t.label,
+                  tabCounts[t.id] > 0 ? React.createElement("span", { style: { background: "#1e293b", borderRadius: 99, padding: "1px 7px", fontSize: "0.7rem", color: "#94a3b8", marginLeft: 4 } }, tabCounts[t.id]) : null
+                )
+              )
+            ),
+            React.createElement("div", { style: { background: "#111827", borderRadius: "0 0 10px 10px", border: "1px solid #1e293b", borderTop: "none", minHeight: 80 } },
+              tabContent[activeTab]
+            )
+
+          ) : null
+        )
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>
