@@ -34,7 +34,7 @@
     function parsePastDue(wb) {
       const ws = wb.Sheets["Past Due"];
       if (!ws) return [];
-      // cellDates:true on read means date cells come through as JS Date objects
+      // cellDates:true is set on XLSX.read() at workbook level; raw:true preserves numeric serial dates which toJsDate() handles
       return XLSX.utils.sheet_to_json(ws, { defval: "", raw: true });
     }
     function parseCINC(wb) {
@@ -45,8 +45,7 @@
     /* detect which uploaded workbook is master vs CINC by sheet names */
     function detectFileType(wb) {
       if (wb.SheetNames.includes("Master Accounting")) return "master";
-      const firstCols = Object.keys(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 })[0] || {});
-      // CINC export has a "Status" column, master doesn't
+      // CINC export has a "Status" or "Lot No" column
       const row1 = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 })[0] || [];
       if (row1.includes("Status") || row1.includes("Lot No")) return "cinc";
       return null;
@@ -82,7 +81,7 @@
           const oldBal = row["Balance"], newBal = cr["Balance"];
           if (String(oldBal) !== String(newBal)) {
             updated[idx]["Balance"] = newBal;
-            changes.push({ accountNo: key, name: row["Primary Homeowner"], address: row["Address"], oldBalance: oldBal, newBalance: newBal });
+            changes.push({ accountNo: key, name: row["Primary Homeowner"], oldBalance: oldBal, newBalance: newBal });
           }
         } else {
           const newRow = {};
@@ -128,7 +127,7 @@
           else pdCleaned.push({ ...row, Balance: currentBal });
         }
       }
-      return { newPd, pdAdded, pdRemoved, pdCleaned };
+      return { newPd, pdAdded, pdRemoved: [...pdRemoved, ...pdCleaned] };
     }
 
     /* ── duplicate detection ─────────────────────────────────────────── */
@@ -202,14 +201,14 @@
       // Autofit cols
       const pdCols = [
         { col: 1, vals: ["Account No",        ...newPd.map(r => r["Account No"])] },
-        { col: 2, vals: ["Primary Homeowner",  ...newPd.map(r => r["Primary Homeowner"])] },
-        { col: 3, vals: ["Address",            ...newPd.map(r => r["Address"])] },
+        { col: 2, fixed: 24.0 },
+        { col: 3, fixed: 28.0 },
         { col: 4, vals: ["Email"] },
         { col: 5, vals: ["Balance",           ...newPd.map(r => r["Balance"])] },
         { col: 6, vals: ["Last Contacted"] },
         { col: 7, vals: ["Notes",              ...newPd.map(r => r["Notes"])] },
       ];
-      for (const { col, vals } of pdCols) pdWs.getColumn(col).width = autofitWidth(vals);
+      for (const { col, vals, fixed } of pdCols) pdWs.getColumn(col).width = fixed !== undefined ? fixed : autofitWidth(vals);
 
       /* ── Master Accounting ── */
       const maWs = wb.addWorksheet("Master Accounting");
@@ -226,22 +225,12 @@
 
       const maCols = [
         { col: 1, vals: ["Account No",        ...updatedMaster.map(r => r["Account No"])] },
-        { col: 2, vals: ["Primary Homeowner",  ...updatedMaster.map(r => r["Primary Homeowner"])] },
-        { col: 3, vals: ["Address",            ...updatedMaster.map(r => r["Address"])] },
+        { col: 2, fixed: 24.0 },
+        { col: 3, fixed: 28.0 },
         { col: 4, vals: ["Email"] },
         { col: 5, vals: ["Balance",           ...updatedMaster.map(r => r["Balance"])] },
       ];
-      for (const { col, vals } of maCols) maWs.getColumn(col).width = autofitWidth(vals);
-
-      /* ── Past Due Test (copy as-is) ── */
-      if (originalWb.SheetNames.includes("Past Due Test")) {
-        const testWs  = wb.addWorksheet("Past Due Test");
-        const rawData = XLSX.utils.sheet_to_json(originalWb.Sheets["Past Due Test"], { header: 1, defval: "" });
-        for (let i = 0; i < rawData.length; i++) {
-          const r = testWs.addRow(rawData[i]);
-          if (i === 0) r.font = { bold: true, size: 11, name: "Calibri" };
-        }
-      }
+      for (const { col, vals, fixed } of maCols) maWs.getColumn(col).width = fixed !== undefined ? fixed : autofitWidth(vals);
 
       return wb.xlsx.writeBuffer();
     }
@@ -251,15 +240,6 @@
       const n = parseFloat(val);
       if (isNaN(n)) return String(val != null ? val : "");
       return "$" + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-    }
-    function fmtDate(val) {
-      const d = toJsDate(val);
-      if (!d) return "";
-      return (d.getMonth()+1) + "/" + d.getDate() + "/" + d.getFullYear();
-    }
-    function todayStr() {
-      const n = new Date();
-      return (n.getMonth()+1) + "/" + n.getDate() + "/" + n.getFullYear();
     }
 
     const TABS = [
@@ -319,16 +299,7 @@
       const [lastSynced, setLastSynced] = useState(null);
       const [globalDrag, setGlobalDrag] = useState(false);
 
-      // Global drag-over the whole page
-      useEffect(() => {
-        const over  = e => { e.preventDefault(); setGlobalDrag(true); };
-        const leave = e => { if (!e.relatedTarget) setGlobalDrag(false); };
-        const drop  = e => { e.preventDefault(); setGlobalDrag(false); };
-        window.addEventListener("dragover", over);
-        window.addEventListener("dragleave", leave);
-        window.addEventListener("drop", drop);
-        return () => { window.removeEventListener("dragover",over); window.removeEventListener("dragleave",leave); window.removeEventListener("drop",drop); };
-      }, []);
+      // Global drag events — merged into one effect to avoid duplicate listeners
 
       const readFile = (file, setter, nameSetter) => {
         const reader = new FileReader();
@@ -342,8 +313,6 @@
       };
 
       const assignFile = (file) => {
-        const wb = (() => { try { return XLSX.read(new Uint8Array([])); } catch{} })(); // dummy
-        // We need to read first to detect
         const reader = new FileReader();
         reader.onload = e => {
           try {
@@ -373,15 +342,22 @@
         }
       }, [masterWb]);
 
-      // Global drop handler (anywhere on page)
       useEffect(() => {
-        const handler = e => {
+        const over    = e => { e.preventDefault(); setGlobalDrag(true); };
+        const leave   = e => { if (!e.relatedTarget) setGlobalDrag(false); };
+        const onDrop  = e => {
           e.preventDefault(); setGlobalDrag(false);
           const file = e.dataTransfer.files[0]; if (!file) return;
           assignFile(file);
         };
-        window.addEventListener("drop", handler);
-        return () => window.removeEventListener("drop", handler);
+        window.addEventListener("dragover", over);
+        window.addEventListener("dragleave", leave);
+        window.addEventListener("drop", onDrop);
+        return () => {
+          window.removeEventListener("dragover", over);
+          window.removeEventListener("dragleave", leave);
+          window.removeEventListener("drop", onDrop);
+        };
       }, [masterWb]);
 
       const handleFileInput = (e, type) => {
@@ -398,10 +374,10 @@
           const cincRows   = parseCINC(cincWb);
           const dups       = findDuplicates(masterRows);
           const { updated, changes, added }             = syncMaster(masterRows, cincRows);
-          const { newPd, pdAdded, pdRemoved, pdCleaned } = syncPastDue(updated, oldPdRows);
+          const { newPd, pdAdded, pdRemoved } = syncPastDue(updated, oldPdRows);
           const now = new Date();
           setLastSynced(now.toLocaleString());
-          setResult({ changes, added, newPd, pdAdded, pdRemoved, pdCleaned, updated, dups });
+          setResult({ changes, added, newPd, pdAdded, pdRemoved, updated, dups });
           setActiveTab("balances");
         } catch (err) { setError(err.message); }
       };
@@ -419,14 +395,14 @@
         setBuilding(false);
       };
 
-      const tabCounts = result ? {
+      const tabCounts = React.useMemo(() => result ? {
         balances:  result.changes.length,
         newmaster: result.added.length,
         pdadded:   result.pdAdded.length,
-        pdremoved: result.pdRemoved.length + result.pdCleaned.length,
-      } : {};
+        pdremoved: result.pdRemoved.length,
+      } : {}, [result]);
 
-      const tabContent = result ? {
+      const tabContent = React.useMemo(() => result ? {
         balances: React.createElement(TableSection, { rows:result.changes, emptyMsg:"No balance changes detected.", columns:[
           { key:"accountNo",  label:"Account No",  mono:true, color:()=>"#94a3b8", nowrap:true },
           { key:"name",       label:"Homeowner" },
@@ -445,20 +421,20 @@
           { key:"Address",           label:"Address",    color:()=>"#94a3b8" },
           { key:"Balance",           label:"Balance",    mono:true, nowrap:true, color:()=>"#86efac", render:r=>fmt(r["Balance"]) },
         ]}),
-        pdremoved: React.createElement(TableSection, { rows:[...result.pdRemoved,...result.pdCleaned], emptyMsg:"No rows removed from Past Due.", columns:[
+        pdremoved: React.createElement(TableSection, { rows:result.pdRemoved, emptyMsg:"No rows removed from Past Due.", columns:[
           { key:"Account No",        label:"Account No", mono:true, color:()=>"#94a3b8", nowrap:true },
           { key:"Primary Homeowner", label:"Homeowner" },
           { key:"Address",           label:"Address",    color:()=>"#94a3b8" },
           { key:"Balance",           label:"Balance",    mono:true, nowrap:true, color:()=>"#f87171", render:r=>fmt(r["Balance"]) },
         ]}),
-      } : {};
+      } : {}, [result]);
 
-      const summaryCards = result ? [
+      const summaryCards = React.useMemo(() => result ? [
         { label:"Balances Updated",      value:result.changes.length,                            color:"#3b82f6", icon:"🔄" },
         { label:"New to Master",         value:result.added.length,                              color:"#a78bfa", icon:"➕" },
         { label:"Added to Past Due",     value:result.pdAdded.length,                            color:"#f59e0b", icon:"📋" },
-        { label:"Removed from Past Due", value:result.pdRemoved.length+result.pdCleaned.length,  color:"#22c55e", icon:"✅" },
-      ] : [];
+        { label:"Removed from Past Due", value:result.pdRemoved.length,  color:"#22c55e", icon:"✅" },
+      ] : [], [result]);
 
       return React.createElement("div", {
         style:{ minHeight:"100vh", background: globalDrag ? "#0d1829" : "#0a0f1a", color:"#e2e8f0", fontFamily:"'DM Sans',sans-serif", padding:"40px 20px", transition:"background 0.2s" }
