@@ -152,7 +152,6 @@
     function excelCharWidth(text) {
       if (!text && text !== 0) return 0;
       const s = String(text);
-      // Calibri 11: avg char ~1.0 units, wide chars (W,M) ~1.3, narrow (i,l,1) ~0.5
       let w = 0;
       for (const ch of s) {
         const c = ch.charCodeAt(0);
@@ -160,10 +159,22 @@
         else if ('il|!.,;: '.includes(ch) || (c >= 48 && c <= 57)) w += 0.75;
         else w += 1.0;
       }
-      return w + 1.5; // padding
+      return w + 1.5;
+    }
+    // Format a number as it appears in Excel accounting format: "$ 1,146.69 "
+    // then measure that string so the column is always wide enough
+    function accountingDisplayStr(val) {
+      const n = parseFloat(val);
+      if (isNaN(n)) return String(val != null ? val : "");
+      const abs = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return n < 0 ? `$(${abs}) ` : `$ ${abs} `;
     }
     function autofitWidth(values, min = 8) {
-      return Math.max(min, ...values.map(v => excelCharWidth(v)));
+      return Math.max(min, ...values.map(v => {
+        const n = parseFloat(v);
+        const str = (!isNaN(n) && v !== "") ? accountingDisplayStr(v) : String(v != null ? v : "");
+        return excelCharWidth(str);
+      }));
     }
 
     /* ── ExcelJS workbook builder ────────────────────────────────────── */
