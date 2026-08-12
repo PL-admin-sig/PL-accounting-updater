@@ -395,7 +395,7 @@
           const blob = new Blob([buffer], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
           const url  = URL.createObjectURL(blob);
           const a    = document.createElement("a");
-          a.href = url; a.download = "Prosperity_Lakes_Accounting_Updated.xlsx"; a.click();
+          a.href = url; a.download = "Medley Past Due.xlsx"; a.click();
           URL.revokeObjectURL(url);
         } catch (err) { setError("Download failed: " + err.message); }
         setBuilding(false);
